@@ -10,8 +10,13 @@
 #include "assets.h"
 #include "settings.h"
 
+// Mochi: emotion tag sync — GIF display hooks (Session 2)
+#include "mochi/mochi_emotion.h"
+#include "mochi/mochi_display.h"
+
 #include <cstring>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -557,11 +562,41 @@ void Application::InitializeProtocol() {
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
+            auto text_field = cJSON_GetObjectItem(root, "text");
+
+            // Mochi: intercept emotion tag BEFORE TTS begins
+            // This fires from the WebSocket callback, before tts:start is processed.
+            // The Schedule() pushes to a FIFO deque, so this runs before speaking state.
+            MochiEmotion mochi_emotion = MochiEmotion::kThinking; // fallback if no emotion field
+
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
-                });
+                mochi_emotion = EmotionFromString(std::string(emotion->valuestring));
+                int64_t t = esp_timer_get_time();
+                ESP_LOGI("MOCHI", "EMOTION_TAG: %s -> GIF switching (t=%" PRId64 "us)",
+                         emotion->valuestring, t);
             }
+
+            // Also try emoji fallback from the "text" field
+            if (mochi_emotion == MochiEmotion::kIdle && cJSON_IsString(text_field)) {
+                MochiEmotion emoji_emotion = EmotionFromEmoji(std::string(text_field->valuestring));
+                if (emoji_emotion != MochiEmotion::kIdle) {
+                    mochi_emotion = emoji_emotion;
+                    ESP_LOGI("MOCHI", "EMOTION_EMOJI: %s -> %s",
+                             text_field->valuestring, MochiEmotionName(mochi_emotion));
+                }
+            }
+
+            // Schedule Mochi GIF switch + existing Xiaozhi display update
+            Schedule([display, mochi_emotion,
+                      emotion_str = cJSON_IsString(emotion) ? std::string(emotion->valuestring) : std::string()]() {
+                // Mochi GIF switch (fires first, before any state transition)
+                mochi_display_set_emotion(mochi_emotion);
+
+                // Xiaozhi display update (preserved — not replaced)
+                if (!emotion_str.empty()) {
+                    display->SetEmotion(emotion_str.c_str());
+                }
+            });
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
@@ -860,7 +895,25 @@ void Application::HandleStateChangedEvent() {
     auto display = board.GetDisplay();
     auto led = board.GetLed();
     led->OnStateChanged();
-    
+
+    // Mochi: log every state change with timestamp for timing verification
+    {
+        int64_t t = esp_timer_get_time();
+        const char* state_name = "unknown";
+        switch (new_state) {
+            case kDeviceStateIdle:       state_name = "idle"; break;
+            case kDeviceStateConnecting: state_name = "connecting"; break;
+            case kDeviceStateListening:  state_name = "listening"; break;
+            case kDeviceStateSpeaking:   state_name = "speaking"; break;
+            case kDeviceStateStarting:   state_name = "starting"; break;
+            case kDeviceStateWifiConfiguring: state_name = "wifi_config"; break;
+            case kDeviceStateUpgrading:  state_name = "upgrading"; break;
+            case kDeviceStateActivating: state_name = "activating"; break;
+            default: break;
+        }
+        ESP_LOGI("MOCHI", "STATE: %s (t=%" PRId64 "us)", state_name, t);
+    }
+
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
@@ -869,15 +922,24 @@ void Application::HandleStateChangedEvent() {
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
+
+            // Mochi: return to idle GIF (only if no recent LLM emotion is active)
+            mochi_display_set_emotion(MochiEmotion::kIdle);
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
+
+            // Mochi: show thinking GIF while connecting
+            mochi_display_set_emotion(MochiEmotion::kThinking);
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+
+            // Mochi: always show listening GIF (override any previous emotion)
+            mochi_display_set_emotion(MochiEmotion::kListening);
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -886,7 +948,7 @@ void Application::HandleStateChangedEvent() {
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
-                
+
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
@@ -899,7 +961,7 @@ void Application::HandleStateChangedEvent() {
             // Disable wake word detection in listening mode
             audio_service_.EnableWakeWordDetection(false);
 #endif
-            
+
             // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
             if (play_popup_on_listening_) {
                 play_popup_on_listening_ = false;
@@ -908,6 +970,10 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+
+            // Mochi: do NOT change emotion here — let the pre-TTS emotion tag hold.
+            // The LLM emotion packet was already processed before tts:start,
+            // so the correct GIF is already playing.
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
