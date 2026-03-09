@@ -13,6 +13,11 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
 
+// Mochi: GIF display, audio, and personality engines (Sessions 2-3)
+#include "mochi/mochi_display.h"
+#include "mochi/mochi_audio.h"
+#include "mochi/mochi_personality.h"
+
 #define TAG "waveshare_s3_amoled_1_32"
 
 static const sh8601_lcd_init_cmd_t lcd_init_cmds[] = {
@@ -169,6 +174,13 @@ class CustomBoard : public WifiBoard {
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
         display_ = new CustomLcdDisplay(io_handle, panel_handle, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+
+        // Mochi: initialize GIF display engine with the LCD panel handle
+        mochi_display_init(panel_handle, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+
+        // Mochi Session 3: initialize reactive sound engine and personality layer
+        mochi_audio_init();
+        mochi_personality_init();
     }
 
     void InitializeTools() {
