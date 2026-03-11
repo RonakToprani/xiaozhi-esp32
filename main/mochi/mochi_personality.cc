@@ -22,6 +22,9 @@
 
 #include "mochi_personality.h"
 #include "mochi_audio.h"
+#include "mochi_display.h"
+#include "mochi_touch.h"
+#include "application.h"
 
 #include <esp_log.h>
 #include <esp_random.h>
@@ -125,6 +128,88 @@ void mochi_personality_on_emotion_change(MochiEmotion old_emotion, MochiEmotion 
         default:
             break;
     }
+}
+
+// =============================================================================
+// TOUCH REACTIONS (Session 4)
+//
+// Zone+Gesture → Emotion + Sound + Subtitle text
+// All reactions are instant local (no LLM round-trip).
+// =============================================================================
+
+// Helper: set emotion + play sound (no text — sound + face IS the reaction)
+static void react(MochiEmotion emotion, SoundClip sound, bool looping = false) {
+    mochi_display_set_emotion(emotion);
+
+    if (looping) {
+        mochi_audio_play_looping(sound);
+        s_purring = (sound == SoundClip::kPurrLoop);
+    } else {
+        mochi_audio_play(sound);
+    }
+}
+
+void mochi_touch_trigger_reaction(TouchZone zone, TouchGesture gesture) {
+    if (!s_initialized) return;
+
+    ESP_LOGI(TAG, "TOUCH_REACTION: zone=%s gesture=%s",
+             TouchZoneName(zone), TouchGestureName(gesture));
+
+    // --- SWIPE_UP from any zone: trigger AI conversation ---
+    if (gesture == TouchGesture::kSwipeUp) {
+        ESP_LOGI(TAG, "Swipe up → triggering AI conversation");
+        mochi_display_set_emotion(MochiEmotion::kListening);
+        mochi_audio_play(SoundClip::kConfirm);
+        Application::GetInstance().ToggleChatState();
+        return;
+    }
+
+    // --- CENTER zone reactions ---
+    if (zone == TouchZone::kCenter) {
+        switch (gesture) {
+            case TouchGesture::kTap:
+                react(MochiEmotion::kHappy, SoundClip::kChirpHappy);
+                return;
+            case TouchGesture::kLongPress:
+                react(MochiEmotion::kLoved, SoundClip::kPurrLoop, /*looping=*/true);
+                return;
+            case TouchGesture::kDoubleTap:
+                react(MochiEmotion::kExcited, SoundClip::kJoyBurst);
+                return;
+            default:
+                break;
+        }
+    }
+
+    // --- TOP zone reactions ---
+    if (zone == TouchZone::kTop) {
+        switch (gesture) {
+            case TouchGesture::kTap:
+                react(MochiEmotion::kStartled, SoundClip::kYelpScared);
+                return;
+            case TouchGesture::kLongPress:
+                react(MochiEmotion::kSleepy, SoundClip::kYawn);
+                return;
+            default:
+                break;
+        }
+    }
+
+    // --- SWIPE_DOWN from any zone → sad ---
+    if (gesture == TouchGesture::kSwipeDown) {
+        react(MochiEmotion::kSad, SoundClip::kSighRelieved);
+        return;
+    }
+
+    // --- LEFT/RIGHT zone swipe reactions ---
+    if ((zone == TouchZone::kLeft || zone == TouchZone::kRight) &&
+        (gesture == TouchGesture::kSwipeLeft || gesture == TouchGesture::kSwipeRight)) {
+        react(MochiEmotion::kConfused, SoundClip::kDizzy);
+        return;
+    }
+
+    // --- Default reaction for unlisted combos ---
+    react(MochiEmotion::kHappy, SoundClip::kChirpHappy);
 }
 
 void mochi_personality_deinit() {

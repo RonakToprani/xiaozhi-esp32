@@ -21,6 +21,10 @@
 #define PWR_BUTTON_GPIO         GPIO_NUM_17
 #define PWR_EN_GPIO             GPIO_NUM_18
 
+/*touch*/
+#define TOUCH_INT_GPIO          GPIO_NUM_16
+#define TOUCH_I2C_ADDR          0x15
+
 
 /*disp-qspi-lcd*/
 #define LCD_CS       GPIO_NUM_10

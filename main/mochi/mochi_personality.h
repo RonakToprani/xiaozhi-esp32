@@ -13,6 +13,7 @@
 // =============================================================================
 
 #include "mochi_emotion.h"
+#include "mochi_touch.h"
 
 // Initialize the personality layer.
 // Must be called after mochi_audio_init() and mochi_display_init().
@@ -22,6 +23,11 @@ void mochi_personality_init();
 // Triggers the appropriate reactive sound for the transition.
 // Must be called from the thread that changes the emotion (typically main task).
 void mochi_personality_on_emotion_change(MochiEmotion old_emotion, MochiEmotion new_emotion);
+
+// Called from the touch engine when a zone+gesture combo is detected.
+// Triggers instant local reaction: emotion change + sound + subtitle text.
+// Thread-safe: can be called from the touch task.
+void mochi_touch_trigger_reaction(TouchZone zone, TouchGesture gesture);
 
 // Deinitialize the personality layer.
 void mochi_personality_deinit();

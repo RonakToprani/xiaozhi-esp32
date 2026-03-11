@@ -13,10 +13,11 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
 
-// Mochi: GIF display, audio, and personality engines (Sessions 2-3)
+// Mochi: GIF display, audio, personality, and touch engines (Sessions 2-4)
 #include "mochi/mochi_display.h"
 #include "mochi/mochi_audio.h"
 #include "mochi/mochi_personality.h"
+#include "mochi/mochi_touch.h"
 
 #define TAG "waveshare_s3_amoled_1_32"
 
@@ -182,6 +183,8 @@ class CustomBoard : public WifiBoard {
         mochi_audio_init();
         mochi_personality_init();
 
+        // Mochi Session 4: initialize touch zone + gesture engine
+        mochi_touch_init(i2c_bus_);
     }
 
     void InitializeTools() {
