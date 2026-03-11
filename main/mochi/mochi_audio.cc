@@ -1,14 +1,14 @@
 // =============================================================================
 // mochi_audio.cc — Mochi reactive sound engine
 //
-// Plays 16kHz mono 16-bit PCM files from SPIFFS through the ES8311 codec.
+// Plays 16kHz mono 16-bit PCM from memory-mapped assets through ES8311 codec.
 // Shares I2S_NUM_0 with Xiaozhi TTS by state-gating: only plays during
 // kDeviceStateIdle. Immediately stops on state change to speaking/listening.
 //
 // Architecture:
 //   - Dedicated FreeRTOS task pinned to Core 1, priority 5
 //   - Task notification wakes the task for play/stop commands
-//   - 4KB ring buffer feeds I2S DMA without glitches
+//   - PCM data read from mmap'd assets partition (zero-copy lookup)
 //   - Resamples 16kHz → 24kHz (3:2 upsampling) before codec write
 //   - Checks is_mochi_audio_allowed() before EVERY write buffer
 //   - Volume control via sample scaling (0-100 → 0.0-1.0)
@@ -23,9 +23,7 @@
 
 #include "mochi_audio.h"
 
-#include <cstdio>
 #include <cstring>
-#include <sys/stat.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -36,6 +34,7 @@
 #include "board.h"
 #include "audio_codec.h"
 #include "application.h"
+#include "assets.h"
 
 static const char* TAG = "MOCHI_AUDIO";
 
@@ -44,9 +43,9 @@ static const char* TAG = "MOCHI_AUDIO";
 // ---------------------------------------------------------------------------
 static const int PCM_SAMPLE_RATE       = 16000;   // Our PCM files
 static const int CODEC_SAMPLE_RATE     = 24000;   // ES8311 output rate
-static const int READ_BUF_SAMPLES      = 1024;    // Samples per SPIFFS read
+static const int READ_BUF_SAMPLES      = 1024;    // Samples per read chunk
 static const int WRITE_BUF_SAMPLES     = 1536;    // After 16k→24k resample (1024 * 3/2)
-static const int AUDIO_TASK_STACK_SIZE = 4096;
+static const int AUDIO_TASK_STACK_SIZE = 6144;     // Need headroom: vector alloc + codec call
 static const int AUDIO_TASK_PRIORITY   = 5;
 static const int AUDIO_TASK_CORE       = 1;
 
@@ -67,14 +66,6 @@ static SoundClip       s_pending_clip  = SoundClip::kChirpHappy;
 static uint8_t         s_volume        = 60;  // 0-100, default 60%
 
 // ---------------------------------------------------------------------------
-// Helper: check if a PCM file exists on SPIFFS
-// ---------------------------------------------------------------------------
-static bool pcm_file_exists(const char* path) {
-    struct stat st;
-    return (stat(path, &st) == 0);
-}
-
-// ---------------------------------------------------------------------------
 // Resample 16kHz → 24kHz (3:2 ratio) using linear interpolation
 //
 // For every 2 input samples, we produce 3 output samples.
@@ -93,7 +84,6 @@ static int resample_16k_to_24k(const int16_t* in, int in_samples, int16_t* out, 
 
     for (int i = 0; i < out_samples; i++) {
         // Map output index to fractional input index
-        // out_idx / out_rate = in_idx / in_rate
         // in_frac = i * 2.0 / 3.0
         int in_idx = (i * 2) / 3;
         int frac_num = (i * 2) % 3;  // Numerator of fraction (0, 1, 2) / 3
@@ -131,12 +121,14 @@ static void apply_volume(int16_t* buf, int samples, uint8_t volume) {
 // ---------------------------------------------------------------------------
 // Audio playback task — pinned to Core 1
 //
-// Waits for play notifications, then reads PCM from SPIFFS, resamples,
-// and writes to the codec. Checks device state before every write.
+// Waits for play notifications, then reads PCM from mmap'd assets,
+// resamples, and writes to the codec. Checks device state before every write.
 // ---------------------------------------------------------------------------
 static void mochi_audio_task(void* arg) {
-    int16_t read_buf[READ_BUF_SAMPLES];
-    int16_t write_buf[WRITE_BUF_SAMPLES];
+    // Buffers are static: only one audio task exists, and placing 5KB+ on
+    // a 6KB stack would leave no headroom for codec calls / vector alloc.
+    static int16_t read_buf[READ_BUF_SAMPLES];
+    static int16_t write_buf[WRITE_BUF_SAMPLES];
 
     ESP_LOGI(TAG, "Audio task started on Core %d", xPortGetCoreID());
 
@@ -170,16 +162,20 @@ static void mochi_audio_task(void* arg) {
             continue;
         }
 
-        // Resolve PCM path
-        char pcm_path[64];
-        SoundClipPath(clip, pcm_path, sizeof(pcm_path));
+        // Look up PCM data in memory-mapped assets
+        char asset_name[64];
+        SoundClipAssetName(clip, asset_name, sizeof(asset_name));
 
-        if (!pcm_file_exists(pcm_path)) {
-            ESP_LOGW(TAG, "SOUND_MISSING: %s — skipping", pcm_path);
+        void* pcm_ptr = nullptr;
+        size_t pcm_size = 0;
+        if (!Assets::GetInstance().GetAssetData(asset_name, pcm_ptr, pcm_size)) {
+            ESP_LOGW(TAG, "SOUND_MISSING: %s — skipping", asset_name);
             continue;
         }
 
-        ESP_LOGI(TAG, "SOUND_PLAY: %s (loop=%d, vol=%d)", SoundClipName(clip), looping, volume);
+        size_t total_samples = pcm_size / sizeof(int16_t);
+        ESP_LOGI(TAG, "SOUND_PLAY: %s (loop=%d, vol=%d, samples=%u)",
+                 SoundClipName(clip), looping, volume, (unsigned)total_samples);
 
         // Get codec
         AudioCodec* codec = Board::GetInstance().GetAudioCodec();
@@ -192,16 +188,12 @@ static void mochi_audio_task(void* arg) {
         size_t heap_before = esp_get_free_heap_size();
 
         do {  // Loop point for looping playback
-            // Open PCM file
-            FILE* fp = fopen(pcm_path, "rb");
-            if (!fp) {
-                ESP_LOGE(TAG, "Failed to open %s", pcm_path);
-                break;
-            }
+            const int16_t* src = static_cast<const int16_t*>(pcm_ptr);
+            size_t offset = 0;  // Sample offset into PCM data
 
             s_playing = true;
 
-            while (!s_stop_request) {
+            while (!s_stop_request && offset < total_samples) {
                 // Check state before every read+write cycle
                 if (!is_mochi_audio_allowed()) {
                     ESP_LOGI(TAG, "SOUND_STOP: %s (state not allowed)", SoundClipName(clip));
@@ -214,24 +206,24 @@ static void mochi_audio_task(void* arg) {
                     codec->EnableOutput(true);
                 }
 
-                // Read a chunk of PCM data
-                size_t samples_read = fread(read_buf, sizeof(int16_t), READ_BUF_SAMPLES, fp);
-                if (samples_read == 0) {
-                    break;  // EOF
+                // Copy a chunk of PCM data from mmap'd memory
+                size_t samples_to_read = READ_BUF_SAMPLES;
+                if (offset + samples_to_read > total_samples) {
+                    samples_to_read = total_samples - offset;
                 }
+                memcpy(read_buf, src + offset, samples_to_read * sizeof(int16_t));
+                offset += samples_to_read;
 
                 // Apply volume
-                apply_volume(read_buf, samples_read, volume);
+                apply_volume(read_buf, samples_to_read, volume);
 
                 // Resample 16kHz → 24kHz
-                int out_samples = resample_16k_to_24k(read_buf, samples_read, write_buf, WRITE_BUF_SAMPLES);
+                int out_samples = resample_16k_to_24k(read_buf, samples_to_read, write_buf, WRITE_BUF_SAMPLES);
 
                 // Write to codec (this blocks until DMA accepts the data)
                 std::vector<int16_t> out_vec(write_buf, write_buf + out_samples);
                 codec->OutputData(out_vec);
             }
-
-            fclose(fp);
 
         } while (looping && !s_stop_request);
 
@@ -289,7 +281,7 @@ void mochi_audio_play(SoundClip clip) {
     if (!s_initialized) return;
 
     if (!is_mochi_audio_allowed()) {
-        ESP_LOGD(TAG, "Play blocked: state not allowed");
+        ESP_LOGD(TAG, "Play blocked: device state not idle");
         return;
     }
 
@@ -313,7 +305,7 @@ void mochi_audio_play_looping(SoundClip clip) {
     if (!s_initialized) return;
 
     if (!is_mochi_audio_allowed()) {
-        ESP_LOGD(TAG, "Loop play blocked: state not allowed");
+        ESP_LOGD(TAG, "Loop play blocked: device state not idle");
         return;
     }
 
