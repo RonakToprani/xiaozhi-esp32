@@ -181,6 +181,7 @@ class CustomBoard : public WifiBoard {
         // Mochi Session 3: initialize reactive sound engine and personality layer
         mochi_audio_init();
         mochi_personality_init();
+
     }
 
     void InitializeTools() {

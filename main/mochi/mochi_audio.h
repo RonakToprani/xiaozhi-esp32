@@ -82,10 +82,10 @@ inline const char* SoundClipName(SoundClip clip) {
 }
 
 // ---------------------------------------------------------------------------
-// SPIFFS path helper: /spiffs/sounds/<name>.pcm
+// Asset name helper: sounds/<name>.pcm (used for mmap_assets lookup)
 // ---------------------------------------------------------------------------
-inline const char* SoundClipPath(SoundClip clip, char* buf, size_t buf_size) {
-    snprintf(buf, buf_size, "/spiffs/sounds/%s.pcm", SoundClipName(clip));
+inline const char* SoundClipAssetName(SoundClip clip, char* buf, size_t buf_size) {
+    snprintf(buf, buf_size, "sounds/%s.pcm", SoundClipName(clip));
     return buf;
 }
 
