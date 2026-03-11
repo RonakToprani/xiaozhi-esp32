@@ -1,31 +1,16 @@
 #!/usr/bin/env python3
 """
-Generate 14 Mochi PCM sound files — warm, natural, cute desk-pet sounds.
+Generate 14 Mochi PCM sound files — bubble pops, water drops, vocal chirps.
 Format: 16kHz, mono, 16-bit signed little-endian.
 
-Design principles (inspired by Tamagotchi, Furby, R2-D2):
-  - Warm harmonic tones (not pure sine — adds 2nd/3rd harmonics)
-  - Proper ADSR envelopes for organic feel
-  - Subtle pitch wobble on sustained tones
-  - Pentatonic-friendly note choices (pleasant, non-jarring)
-  - Short and punchy for reactions, gentle for ambient sounds
-  - Sounds like a tiny creature, not a synthesizer
+Sound design v4 — DRAMATICALLY different from beeps/tones:
+  - Bubble pops: high→low frequency sweep with exponential decay ("blip!")
+  - Vocal chirps: dual-frequency formant pairs that mimic tiny "boo!"/"pip!"
+  - Water-drop plucks: sharp downward pitch sweep, sounds like dripping
+  - Soft filtered noise for breathy/purry textures
+  - NO sustained tones, NO rising beeps — everything is plucky/poppy/bubbly
 
-Sounds:
-  chirp_happy      : Quick warm two-note "boo-beep!" (rising)
-  chirp_excited    : Rapid ascending cascade, sparkly
-  purr_loop        : Layered low rumble with realistic AM (~250ms loop)
-  yawn             : Slow descending slide with breathy noise
-  yelp_scared      : Sharp "eep!" — snap attack, high, very short
-  sigh_relieved    : Gentle descending exhale
-  grunt_angry      : Short grumbly growl
-  attention_melody : Three gentle ascending bell tones
-  lonely_melody    : Two soft sad notes, slow and distant
-  good_morning     : Bright gentle ascending chime
-  good_night       : Soft descending lullaby
-  dizzy            : Wobbly spinning pitch
-  joy_burst        : Cascading upward sparkle burst
-  confirm          : Single soft bell "ding"
+Think: water bubbles, Kirby's pop sounds, Animal Crossing item pickup
 """
 
 import struct
@@ -34,133 +19,94 @@ import os
 import random
 
 SAMPLE_RATE = 16000
-MAX_AMP = 16000  # Conservative to avoid clipping after harmonic sum
-
-random.seed(42)  # Reproducible
-
-
-# =============================================================================
-# Waveform generators
-# =============================================================================
-
-def warm_tone(freq, t, harmonics=(1.0, 0.3, 0.12, 0.05)):
-    """Warm harmonic tone — fundamental + overtones for body."""
-    val = 0.0
-    for i, amp in enumerate(harmonics):
-        val += amp * math.sin(2 * math.pi * freq * (i + 1) * t)
-    # Normalize by sum of harmonic amplitudes
-    return val / sum(harmonics)
-
-
-def soft_square(freq, t, softness=0.8):
-    """Soft square wave — rounded edges, warm and fuzzy."""
-    phase = (freq * t) % 1.0
-    if phase < 0.5:
-        return math.tanh(softness * 4)
-    else:
-        return -math.tanh(softness * 4)
-
-
-def noise(amp=0.3):
-    """White noise sample."""
-    return amp * (random.random() * 2 - 1)
+MAX_AMP = 13000
+random.seed(42)
 
 
 # =============================================================================
-# Envelope generators
+# Core sound building blocks
 # =============================================================================
 
-def adsr_envelope(i, n_samples, attack_ms=10, decay_ms=40, sustain=0.7, release_ms=50):
-    """ADSR envelope returning amplitude 0-1."""
-    attack_s = int(SAMPLE_RATE * attack_ms / 1000)
-    decay_s = int(SAMPLE_RATE * decay_ms / 1000)
-    release_s = int(SAMPLE_RATE * release_ms / 1000)
-    release_start = n_samples - release_s
-
-    if i < attack_s:
-        return i / max(attack_s, 1)
-    elif i < attack_s + decay_s:
-        progress = (i - attack_s) / max(decay_s, 1)
-        return 1.0 - (1.0 - sustain) * progress
-    elif i < release_start:
-        return sustain
-    else:
-        progress = (i - release_start) / max(release_s, 1)
-        return sustain * (1.0 - progress)
-
-
-def simple_fade(i, n_samples, fade_in_ms=8, fade_out_ms=15):
-    """Simple fade in/out."""
-    fade_in = int(SAMPLE_RATE * fade_in_ms / 1000)
-    fade_out = int(SAMPLE_RATE * fade_out_ms / 1000)
-    env = 1.0
-    if i < fade_in:
-        env = i / max(fade_in, 1)
-    if i > n_samples - fade_out:
-        env = min(env, (n_samples - i) / max(fade_out, 1))
-    return env
-
-
-# =============================================================================
-# Sound building blocks
-# =============================================================================
-
-def gen_warm_note(freq, duration_ms, amplitude=MAX_AMP, attack_ms=8, decay_ms=30,
-                  sustain=0.7, release_ms=40, vibrato_hz=0, vibrato_depth=0):
-    """Generate a single warm note with ADSR and optional vibrato."""
-    n = int(SAMPLE_RATE * duration_ms / 1000)
-    samples = []
-    phase = 0.0
-    for i in range(n):
-        t = i / SAMPLE_RATE
-        f = freq
-        if vibrato_hz > 0:
-            f += vibrato_depth * math.sin(2 * math.pi * vibrato_hz * t)
-        phase += f / SAMPLE_RATE
-        val = warm_tone(1.0, phase)  # Use normalized phase
-        env = adsr_envelope(i, n, attack_ms, decay_ms, sustain, release_ms)
-        samples.append(int(val * env * amplitude))
-    return samples
-
-
-def gen_glide(freq_start, freq_end, duration_ms, amplitude=MAX_AMP,
-              attack_ms=8, release_ms=30):
-    """Warm gliding tone."""
+def bubble_pop(freq_start, freq_end, duration_ms, amplitude=1.0, decay_speed=5.0):
+    """A bubble pop: frequency sweeps down quickly with exponential decay.
+    This is the core 'cute' sound — like a tiny water bubble popping."""
     n = int(SAMPLE_RATE * duration_ms / 1000)
     samples = []
     phase = 0.0
     for i in range(n):
         t = i / n
-        freq = freq_start + (freq_end - freq_start) * t
+        # Exponential frequency sweep (fast start, slow settle)
+        freq = freq_end + (freq_start - freq_end) * math.exp(-decay_speed * t)
         phase += freq / SAMPLE_RATE
-        val = warm_tone(1.0, phase)
-        env = simple_fade(i, n, attack_ms, release_ms)
-        samples.append(int(val * env * amplitude))
+        # Pure-ish sine (tiny 2nd harmonic for warmth)
+        val = math.sin(2 * math.pi * phase) + 0.08 * math.sin(2 * math.pi * 2 * phase)
+        # Pop envelope: instant attack, smooth exponential decay
+        fade_in = min(1.0, i / max(int(SAMPLE_RATE * 0.001), 1))  # 1ms click guard
+        env = fade_in * math.exp(-decay_speed * 0.8 * t)
+        samples.append(val * env * amplitude * MAX_AMP)
     return samples
 
 
-def gen_silence(duration_ms):
-    return [0] * int(SAMPLE_RATE * duration_ms / 1000)
-
-
-def gen_bell(freq, duration_ms, amplitude=MAX_AMP):
-    """Bell-like tone — quick attack, exponential decay, rich harmonics."""
+def vocal_chirp(base_freq, formant_freq, duration_ms, amplitude=1.0):
+    """Two-frequency formant pair — sounds like a tiny creature voice.
+    base_freq is the 'pitch', formant_freq is the 'vowel color'.
+    The interaction creates a vocal-like quality."""
     n = int(SAMPLE_RATE * duration_ms / 1000)
     samples = []
-    # Bell harmonics: 1, 2, 3, 4.5 (inharmonic for shimmer)
-    bell_harmonics = [1.0, 0.6, 0.25, 0.15]
-    bell_ratios = [1.0, 2.0, 3.0, 4.5]
+    phase1 = 0.0
+    phase2 = 0.0
     for i in range(n):
-        t = i / SAMPLE_RATE
-        # Exponential decay (faster for higher partials)
-        val = 0
-        for amp, ratio in zip(bell_harmonics, bell_ratios):
-            decay = math.exp(-t * (3 + ratio * 2))
-            val += amp * decay * math.sin(2 * math.pi * freq * ratio * t)
-        val /= sum(bell_harmonics)
-        env = simple_fade(i, n, fade_in_ms=2, fade_out_ms=20)
-        samples.append(int(val * env * amplitude))
+        t = i / n
+        # Carrier (base pitch) with slight pitch bend
+        f1 = base_freq * (1.0 + 0.03 * math.sin(math.pi * t))  # Tiny arch
+        phase1 += f1 / SAMPLE_RATE
+        # Formant (vowel resonance) - amplitude modulated by carrier
+        phase2 += formant_freq / SAMPLE_RATE
+        carrier = math.sin(2 * math.pi * phase1)
+        formant = 0.4 * math.sin(2 * math.pi * phase2)
+        # Ring-mod-like interaction gives vocal quality
+        val = carrier * 0.7 + carrier * formant * 0.5 + formant * 0.15
+        # Smooth pop envelope
+        fade_in = min(1.0, i / max(int(SAMPLE_RATE * 0.002), 1))
+        env = fade_in * math.exp(-3.5 * t)
+        samples.append(val * env * amplitude * MAX_AMP)
     return samples
+
+
+def water_drop(freq, duration_ms, amplitude=1.0):
+    """Water drop pluck: sharp attack, rapid pitch drop, quick decay.
+    Sounds like a tiny raindrop or xylophone hit."""
+    n = int(SAMPLE_RATE * duration_ms / 1000)
+    samples = []
+    phase = 0.0
+    for i in range(n):
+        t = i / n
+        # Pitch drops quickly at start then stabilizes
+        f = freq * (1.0 + 0.4 * math.exp(-15 * t))
+        phase += f / SAMPLE_RATE
+        # Clean sine — water drops are pure-toned
+        val = math.sin(2 * math.pi * phase)
+        # Sharp attack with ring (water drop resonance)
+        env = math.exp(-4.0 * t) * (1.0 + 0.3 * math.exp(-20 * t))
+        fade_in = min(1.0, i / max(int(SAMPLE_RATE * 0.001), 1))
+        samples.append(val * fade_in * env * amplitude * MAX_AMP)
+    return samples
+
+
+def soft_noise_burst(duration_ms, amplitude=0.3):
+    """Shaped noise — like a soft breath or puff."""
+    n = int(SAMPLE_RATE * duration_ms / 1000)
+    samples = []
+    for i in range(n):
+        t = i / n
+        val = (random.random() * 2 - 1)
+        env = math.exp(-5 * t)  # Quick fade
+        samples.append(val * env * amplitude * MAX_AMP)
+    return samples
+
+
+def silence(ms):
+    return [0] * int(SAMPLE_RATE * ms / 1000)
 
 
 # =============================================================================
@@ -171,15 +117,273 @@ def save_pcm(filename, samples, output_dir):
     path = os.path.join(output_dir, filename)
     with open(path, 'wb') as f:
         for s in samples:
-            s = max(-32767, min(32767, s))
+            s = max(-32767, min(32767, int(s)))
             f.write(struct.pack('<h', s))
     dur = len(samples) / SAMPLE_RATE
-    print(f"  {filename}: {len(samples)} samples, {dur:.2f}s, {len(samples)*2} bytes")
-    return path
+    print(f"  {filename}: {len(samples)} samples, {dur:.3f}s, {len(samples)*2} bytes")
 
 
 # =============================================================================
-# Main — generate all 14 sounds
+# 14 Sound generators
+# =============================================================================
+
+def gen_chirp_happy():
+    """THE main tap sound: a cute bubble pop pair.
+    Two quick bubble pops ascending — 'buh-BLIP!' like a happy water drop.
+    First pop is low and soft (setup), second is higher and brighter (payoff)."""
+    return (
+        bubble_pop(500, 350, 60, amplitude=0.5, decay_speed=6) +
+        silence(15) +
+        bubble_pop(900, 550, 100, amplitude=0.85, decay_speed=4.5)
+    )
+
+
+def gen_chirp_excited():
+    """Rapid ascending bubble cascade — bubbly excitement!
+    Each bubble pops higher and brighter than the last."""
+    pops = [
+        (600, 400, 45, 0.55),   # freq_start, freq_end, dur_ms, amp
+        (750, 480, 42, 0.60),
+        (900, 560, 38, 0.65),
+        (1050, 640, 35, 0.70),
+        (1200, 720, 55, 0.80),   # Last one rings longer
+    ]
+    samples = []
+    for fs, fe, dur, amp in pops:
+        samples += bubble_pop(fs, fe, dur, amplitude=amp, decay_speed=5)
+        samples += silence(10)
+    return samples
+
+
+def gen_purr_loop():
+    """Warm rumble — low frequencies with gentle pulsing.
+    Less synthetic: uses filtered noise layered with sub-bass for texture."""
+    dur_ms = 250
+    n = int(SAMPLE_RATE * dur_ms / 1000)
+    samples = []
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        # Sub-bass rumble
+        sub = 0.5 * math.sin(2 * math.pi * 30 * t)
+        sub += 0.25 * math.sin(2 * math.pi * 60 * t)
+        sub += 0.10 * math.sin(2 * math.pi * 90 * t)
+        # Filtered noise texture (low-passed by running average simulation)
+        raw_noise = random.random() * 2 - 1
+        tex = 0.08 * raw_noise
+        # Rhythmic AM pulse
+        am = 0.6 + 0.35 * math.sin(2 * math.pi * 4 * t) + 0.05 * math.sin(2 * math.pi * 7.3 * t)
+        val = (sub + tex) * am
+        samples.append(val * MAX_AMP * 0.65)
+    return samples
+
+
+def gen_yawn():
+    """Sleepy yawn: descending vocal chirp that stretches out.
+    Uses formant pair for voice-like quality, pitch slides down slowly."""
+    dur_ms = 600
+    n = int(SAMPLE_RATE * dur_ms / 1000)
+    samples = []
+    phase1 = 0.0
+    phase2 = 0.0
+    for i in range(n):
+        t = i / n
+        # Base pitch descends with a slight arch (opens then closes)
+        pitch_curve = 1.0 + 0.08 * math.sin(math.pi * t * 0.8)  # Slight rise then fall
+        base_f = (460 - 190 * t) * pitch_curve
+        formant_f = 850 - 200 * t  # Formant tracks down too
+        # Tiny vibrato (sleepy wobble)
+        base_f += 5 * math.sin(2 * math.pi * 3 * (i / SAMPLE_RATE))
+        phase1 += base_f / SAMPLE_RATE
+        phase2 += formant_f / SAMPLE_RATE
+        carrier = math.sin(2 * math.pi * phase1)
+        formant = 0.3 * math.sin(2 * math.pi * phase2)
+        val = carrier * 0.6 + carrier * formant * 0.4
+        # Breathy overlay
+        breath = (random.random() * 2 - 1) * 0.05 * (1 - t * 0.6)
+        val += breath
+        # Gentle envelope
+        attack = min(1.0, i / (n * 0.12))
+        release = min(1.0, (n - i) / (n * 0.25))
+        env = attack * release
+        samples.append(val * env * MAX_AMP * 0.55)
+    return samples
+
+
+def gen_yelp_scared():
+    """Quick startled 'eep!': sharp upward bubble pop.
+    Opposite of normal pop — frequency sweeps UP for surprise."""
+    n = int(SAMPLE_RATE * 0.075)
+    samples = []
+    phase = 0.0
+    for i in range(n):
+        t = i / n
+        # Rapid upward sweep — startled!
+        freq = 500 + 600 * (1 - math.exp(-8 * t))
+        phase += freq / SAMPLE_RATE
+        val = math.sin(2 * math.pi * phase)
+        fade_in = min(1.0, i / max(int(SAMPLE_RATE * 0.001), 1))
+        env = fade_in * math.exp(-4 * t)
+        samples.append(val * env * MAX_AMP * 0.8)
+    return samples
+
+
+def gen_sigh_relieved():
+    """Gentle exhale: descending vocal with breathy noise layer."""
+    dur_ms = 350
+    n = int(SAMPLE_RATE * dur_ms / 1000)
+    samples = []
+    phase = 0.0
+    for i in range(n):
+        t = i / n
+        freq = 400 - 130 * t
+        phase += freq / SAMPLE_RATE
+        tone = math.sin(2 * math.pi * phase) * 0.4
+        # Breathy noise (dominant, fading)
+        breath = (random.random() * 2 - 1) * 0.1 * (1 - t * 0.7)
+        val = tone + breath
+        attack = min(1.0, i / (n * 0.1))
+        release = min(1.0, (n - i) / (n * 0.3))
+        samples.append(val * attack * release * MAX_AMP * 0.5)
+    return samples
+
+
+def gen_grunt_angry():
+    """Short grumbly growl: low distorted rumble."""
+    dur_ms = 150
+    n = int(SAMPLE_RATE * dur_ms / 1000)
+    samples = []
+    phase = 0.0
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        freq = 95 + 15 * math.sin(2 * math.pi * 8 * t)
+        phase += freq / SAMPLE_RATE
+        val = (0.5 * math.sin(2 * math.pi * phase) +
+               0.3 * math.sin(2 * math.pi * 2 * phase) +
+               0.12 * math.sin(2 * math.pi * 3 * phase))
+        val = math.tanh(val * 1.3)  # Soft distortion
+        val += (random.random() * 2 - 1) * 0.05  # Grit
+        env = math.exp(-2 * (i / n))
+        fade_in = min(1.0, i / max(int(SAMPLE_RATE * 0.005), 1))
+        samples.append(val * fade_in * env * MAX_AMP * 0.6)
+    return samples
+
+
+def gen_attention_melody():
+    """Three ascending water drops — gentle 'plink plink PLINK!'"""
+    drops = [
+        (600, 80, 0.5),    # freq, dur_ms, amp
+        (780, 75, 0.55),
+        (960, 110, 0.65),   # Last one rings
+    ]
+    samples = []
+    for freq, dur, amp in drops:
+        samples += water_drop(freq, dur, amplitude=amp)
+        samples += silence(45)
+    return samples
+
+
+def gen_lonely_melody():
+    """Two slow descending vocal notes — sad and gentle.
+    Uses formant pairs for voice-like sadness."""
+    notes = [
+        (380, 720, 300, 0.4),   # base_f, formant_f, dur_ms, amp
+        (310, 640, 380, 0.32),
+    ]
+    samples = []
+    for base_f, form_f, dur_ms, amp in notes:
+        n = int(SAMPLE_RATE * dur_ms / 1000)
+        phase1 = 0.0
+        phase2 = 0.0
+        for i in range(n):
+            t = i / n
+            f1 = base_f - 30 * t  # Slight pitch droop
+            f1 += 4 * math.sin(2 * math.pi * 4 * (i / SAMPLE_RATE))  # Sad vibrato
+            f2 = form_f - 40 * t
+            phase1 += f1 / SAMPLE_RATE
+            phase2 += f2 / SAMPLE_RATE
+            carrier = math.sin(2 * math.pi * phase1)
+            formant = 0.3 * math.sin(2 * math.pi * phase2)
+            val = carrier * 0.6 + carrier * formant * 0.4
+            attack = min(1.0, i / (n * 0.12))
+            release = min(1.0, (n - i) / (n * 0.3))
+            samples.append(val * attack * release * amp * MAX_AMP)
+        samples += silence(70)
+    return samples
+
+
+def gen_good_morning():
+    """Bright ascending water drops — cheerful wake-up plinks."""
+    drops = [
+        (550, 70, 0.50),
+        (700, 65, 0.55),
+        (850, 65, 0.60),
+        (1000, 95, 0.65),
+    ]
+    samples = []
+    for freq, dur, amp in drops:
+        samples += water_drop(freq, dur, amplitude=amp)
+        samples += silence(25)
+    return samples
+
+
+def gen_good_night():
+    """Descending gentle water drops — soothing lullaby plinks."""
+    drops = [
+        (800, 100, 0.40),
+        (650, 110, 0.35),
+        (500, 140, 0.28),
+    ]
+    samples = []
+    for freq, dur, amp in drops:
+        samples += water_drop(freq, dur, amplitude=amp)
+        samples += silence(55)
+    return samples
+
+
+def gen_dizzy():
+    """Wobbly bubble — frequency oscillates like spinning."""
+    dur_ms = 300
+    n = int(SAMPLE_RATE * dur_ms / 1000)
+    samples = []
+    phase = 0.0
+    for i in range(n):
+        t = i / n
+        t_sec = i / SAMPLE_RATE
+        # Wide wobble
+        wobble = 100 * math.sin(2 * math.pi * 4.5 * t_sec)
+        freq = 580 + wobble
+        phase += freq / SAMPLE_RATE
+        val = math.sin(2 * math.pi * phase) + 0.08 * math.sin(2 * math.pi * 2 * phase)
+        attack = min(1.0, i / (n * 0.06))
+        release = min(1.0, (n - i) / (n * 0.2))
+        samples.append(val * attack * release * MAX_AMP * 0.55)
+    return samples
+
+
+def gen_joy_burst():
+    """Rapid ascending bubble pops — pure bubbly excitement!"""
+    pops = [
+        (650, 420, 35, 0.6),
+        (800, 500, 32, 0.65),
+        (950, 580, 30, 0.70),
+        (1100, 660, 28, 0.75),
+        (1250, 740, 50, 0.80),
+    ]
+    samples = []
+    for fs, fe, dur, amp in pops:
+        samples += bubble_pop(fs, fe, dur, amplitude=amp, decay_speed=5.5)
+        samples += silence(6)
+    return samples
+
+
+def gen_confirm():
+    """Soft acknowledgment pip: single clean water drop.
+    Quick, subtle, non-intrusive."""
+    return water_drop(820, 80, amplitude=0.45)
+
+
+# =============================================================================
+# Main
 # =============================================================================
 
 def main():
@@ -187,206 +391,20 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     print("Generating Mochi PCM sounds (16kHz, 16-bit LE, mono):\n")
 
-    # -----------------------------------------------------------------------
-    # 1. chirp_happy — Quick warm "boo-beep!" rising two-note
-    #    C5 (523) → G5 (784), short gap, cute and snappy
-    # -----------------------------------------------------------------------
-    samples = (gen_warm_note(523, 90, attack_ms=5, decay_ms=20, sustain=0.6, release_ms=15) +
-               gen_silence(25) +
-               gen_warm_note(784, 110, attack_ms=5, decay_ms=20, sustain=0.65, release_ms=25))
-    save_pcm('chirp_happy.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 2. chirp_excited — Rapid ascending sparkle cascade
-    #    C5→E5→G5→C6→E6, getting brighter and shorter
-    # -----------------------------------------------------------------------
-    notes = [(523, 55), (659, 50), (784, 45), (1047, 40), (1319, 70)]
-    samples = []
-    for freq, dur in notes:
-        samples += gen_warm_note(freq, dur, amplitude=int(MAX_AMP * 0.85),
-                                 attack_ms=3, decay_ms=15, sustain=0.6, release_ms=10)
-        samples += gen_silence(8)
-    save_pcm('chirp_excited.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 3. purr_loop — Realistic cat-purr: layered low frequencies with AM
-    #    ~250ms loop, seamless. Real purrs are 25-50Hz with amplitude modulation.
-    # -----------------------------------------------------------------------
-    dur_ms = 250
-    n = int(SAMPLE_RATE * dur_ms / 1000)
-    samples = []
-    for i in range(n):
-        t = i / SAMPLE_RATE
-        # Core purr: ~30Hz rumble with harmonics
-        fundamental = 0.5 * math.sin(2 * math.pi * 28 * t)
-        harmonic2 = 0.3 * math.sin(2 * math.pi * 56 * t)
-        harmonic3 = 0.15 * math.sin(2 * math.pi * 84 * t)
-        # Slight throat noise
-        throat = 0.08 * noise()
-        # Amplitude modulation at ~5Hz for the rhythmic "vrr-vrr-vrr"
-        am = 0.55 + 0.45 * math.sin(2 * math.pi * 4.5 * t)
-        val = (fundamental + harmonic2 + harmonic3 + throat) * am
-        # Ensure seamless loop (crossfade first/last 10ms is handled by short
-        # ramp but since it loops, we want phase-aligned — 28Hz * 0.25s = 7 cycles ✓)
-        samples.append(int(val * MAX_AMP * 0.7))
-    save_pcm('purr_loop.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 4. yawn — Slow descending slide with breathy overlay
-    #    A4(440) → D4(294), 700ms, gentle and sleepy
-    # -----------------------------------------------------------------------
-    dur_ms = 700
-    n = int(SAMPLE_RATE * dur_ms / 1000)
-    samples = []
-    phase = 0.0
-    for i in range(n):
-        t = i / n
-        freq = 440 - 146 * t  # Linear descent
-        phase += freq / SAMPLE_RATE
-        tone = warm_tone(1.0, phase) * 0.7
-        breath = noise(0.12) * (1.0 - t * 0.5)  # Breath fades out
-        val = (tone + breath)
-        env = adsr_envelope(i, n, attack_ms=30, decay_ms=100, sustain=0.5, release_ms=150)
-        samples.append(int(val * env * MAX_AMP * 0.6))
-    save_pcm('yawn.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 5. yelp_scared — Sharp "eep!" snap, very short
-    #    High B5(988) with fast attack, 80ms total
-    # -----------------------------------------------------------------------
-    samples = gen_warm_note(988, 80, amplitude=int(MAX_AMP * 0.9),
-                            attack_ms=2, decay_ms=15, sustain=0.5, release_ms=20)
-    save_pcm('yelp_scared.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 6. sigh_relieved — Gentle descending exhale
-    #    G4(392) → D4(294), 400ms, soft with breath texture
-    # -----------------------------------------------------------------------
-    dur_ms = 400
-    n = int(SAMPLE_RATE * dur_ms / 1000)
-    samples = []
-    phase = 0.0
-    for i in range(n):
-        t = i / n
-        freq = 392 - 98 * t
-        phase += freq / SAMPLE_RATE
-        tone = warm_tone(1.0, phase) * 0.5
-        breath = noise(0.15) * (0.3 + 0.7 * (1.0 - t))
-        val = tone + breath
-        env = adsr_envelope(i, n, attack_ms=20, decay_ms=60, sustain=0.45, release_ms=100)
-        samples.append(int(val * env * MAX_AMP * 0.5))
-    save_pcm('sigh_relieved.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 7. grunt_angry — Short grumbly growl
-    #    Low A2(110) with distorted harmonics, 180ms
-    # -----------------------------------------------------------------------
-    dur_ms = 180
-    n = int(SAMPLE_RATE * dur_ms / 1000)
-    samples = []
-    phase = 0.0
-    for i in range(n):
-        t = i / SAMPLE_RATE
-        phase += 110 / SAMPLE_RATE
-        # Heavy harmonics for growl character
-        val = (0.5 * math.sin(2 * math.pi * phase) +
-               0.35 * math.sin(2 * math.pi * phase * 2) +
-               0.25 * math.sin(2 * math.pi * phase * 3) +
-               0.15 * math.sin(2 * math.pi * phase * 5))
-        # Slight distortion via soft clipping
-        val = math.tanh(val * 1.5) * 0.7
-        # Add grit
-        val += noise(0.06)
-        env = adsr_envelope(i, n, attack_ms=5, decay_ms=30, sustain=0.65, release_ms=40)
-        samples.append(int(val * env * MAX_AMP * 0.75))
-    save_pcm('grunt_angry.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 8. attention_melody — Three gentle ascending bell tones
-    #    C5→E5→G5, spaced for a friendly "hey listen!"
-    # -----------------------------------------------------------------------
-    samples = (gen_bell(523, 180, int(MAX_AMP * 0.6)) +
-               gen_silence(30) +
-               gen_bell(659, 180, int(MAX_AMP * 0.65)) +
-               gen_silence(30) +
-               gen_bell(784, 250, int(MAX_AMP * 0.7)))
-    save_pcm('attention_melody.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 9. lonely_melody — Two soft sad notes, slow and distant
-    #    E4(330) → C4(262), minor feel, 600ms total
-    # -----------------------------------------------------------------------
-    samples = (gen_warm_note(330, 250, amplitude=int(MAX_AMP * 0.4),
-                             attack_ms=20, decay_ms=60, sustain=0.4, release_ms=60,
-                             vibrato_hz=4, vibrato_depth=3) +
-               gen_silence(50) +
-               gen_warm_note(262, 300, amplitude=int(MAX_AMP * 0.35),
-                             attack_ms=25, decay_ms=80, sustain=0.35, release_ms=80,
-                             vibrato_hz=4, vibrato_depth=3))
-    save_pcm('lonely_melody.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 10. good_morning — Bright ascending chime
-    #     C5→D5→E5→G5, crisp bell tones
-    # -----------------------------------------------------------------------
-    notes = [(523, 100), (587, 100), (659, 100), (784, 160)]
-    samples = []
-    for freq, dur in notes:
-        samples += gen_bell(freq, dur, int(MAX_AMP * 0.6))
-        samples += gen_silence(15)
-    save_pcm('good_morning.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 11. good_night — Soft descending lullaby
-    #     G4→E4→C4, gentle warm tones fading out
-    # -----------------------------------------------------------------------
-    levels = [0.4, 0.33, 0.27]
-    freqs = [392, 330, 262]
-    durs = [180, 200, 280]
-    samples = []
-    for freq, dur, lvl in zip(freqs, durs, levels):
-        samples += gen_warm_note(freq, dur, amplitude=int(MAX_AMP * lvl),
-                                 attack_ms=25, decay_ms=40, sustain=0.4, release_ms=60,
-                                 vibrato_hz=3, vibrato_depth=2)
-        samples += gen_silence(40)
-    save_pcm('good_night.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 12. dizzy — Wobbly spinning pitch modulation
-    #     C5 center with wide vibrato (±60Hz at 6Hz), 350ms
-    # -----------------------------------------------------------------------
-    dur_ms = 350
-    n = int(SAMPLE_RATE * dur_ms / 1000)
-    samples = []
-    phase = 0.0
-    for i in range(n):
-        t = i / SAMPLE_RATE
-        wobble = 60 * math.sin(2 * math.pi * 6 * t)
-        freq = 523 + wobble
-        phase += freq / SAMPLE_RATE
-        val = warm_tone(1.0, phase)
-        env = adsr_envelope(i, n, attack_ms=10, decay_ms=30, sustain=0.6, release_ms=60)
-        samples.append(int(val * env * MAX_AMP * 0.65))
-    save_pcm('dizzy.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 13. joy_burst — Cascading upward sparkle burst
-    #     Rapid ascending bell notes, getting shorter and brighter
-    # -----------------------------------------------------------------------
-    notes = [(523, 40), (659, 35), (784, 35), (1047, 30), (1319, 55)]
-    samples = []
-    for idx, (freq, dur) in enumerate(notes):
-        amp = int(MAX_AMP * (0.5 + idx * 0.08))
-        samples += gen_bell(freq, dur, amp)
-        samples += gen_silence(5)
-    save_pcm('joy_burst.pcm', samples, output_dir)
-
-    # -----------------------------------------------------------------------
-    # 14. confirm — Single soft bell "ding"
-    #     A5 (880), clean and brief, 100ms
-    # -----------------------------------------------------------------------
-    samples = gen_bell(880, 100, int(MAX_AMP * 0.5))
-    save_pcm('confirm.pcm', samples, output_dir)
+    save_pcm('chirp_happy.pcm', gen_chirp_happy(), output_dir)
+    save_pcm('chirp_excited.pcm', gen_chirp_excited(), output_dir)
+    save_pcm('purr_loop.pcm', gen_purr_loop(), output_dir)
+    save_pcm('yawn.pcm', gen_yawn(), output_dir)
+    save_pcm('yelp_scared.pcm', gen_yelp_scared(), output_dir)
+    save_pcm('sigh_relieved.pcm', gen_sigh_relieved(), output_dir)
+    save_pcm('grunt_angry.pcm', gen_grunt_angry(), output_dir)
+    save_pcm('attention_melody.pcm', gen_attention_melody(), output_dir)
+    save_pcm('lonely_melody.pcm', gen_lonely_melody(), output_dir)
+    save_pcm('good_morning.pcm', gen_good_morning(), output_dir)
+    save_pcm('good_night.pcm', gen_good_night(), output_dir)
+    save_pcm('dizzy.pcm', gen_dizzy(), output_dir)
+    save_pcm('joy_burst.pcm', gen_joy_burst(), output_dir)
+    save_pcm('confirm.pcm', gen_confirm(), output_dir)
 
     print(f"\nAll 14 PCM files generated in {os.path.abspath(output_dir)}")
 
