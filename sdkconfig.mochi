@@ -1,0 +1,13 @@
+# Mochi-specific sdkconfig overrides
+# Board: Waveshare ESP32-S3-Touch-AMOLED-1.32
+#
+# Apply these settings after a fresh clone:
+#   idf.py menuconfig  (then navigate to and set each option)
+# OR use the apply script:
+#   python tools/apply_mochi_config.py
+#
+# These settings OVERRIDE the defaults and must be correct for Mochi hardware.
+
+CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_32=y
+CONFIG_LANGUAGE_EN_US=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
